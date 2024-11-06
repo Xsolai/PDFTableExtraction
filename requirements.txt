@@ -1,0 +1,9 @@
+tabula-py
+JPype1
+streamlit
+pandas
+transformers
+torch
+uvicorn
+openai
+fastapi
