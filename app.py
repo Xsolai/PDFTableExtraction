@@ -1,15 +1,17 @@
 import logging
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import tabula
 import pandas as pd
 import os
 from openai import OpenAI
 import json
-from typing import Dict, List, Optional
-import re
+import base64
+import tempfile
+from typing import Dict, List
 from datetime import datetime
 import warnings
-import tempfile
+import re
 
 warnings.filterwarnings("ignore")
 
@@ -21,6 +23,11 @@ app = FastAPI(
     description="Extract invoice data from PDF files using OpenAI's GPT-3.",
     version="0.1"
 )
+
+class PDFData(BaseModel):
+    data: str  # base64-encoded PDF data
+    ext: str  # extension, should be ".pdf"
+
 
 class InvoiceDataExtractor:
     def __init__(self, api_key: str):
@@ -160,14 +167,18 @@ class InvoiceDataExtractor:
             logging.error(f"Error extracting data from PDF: {e}")
             return []
 
+
 @app.post("/extract-invoice-data")
-async def extract_invoice_data(file: UploadFile = File(...)):
+async def extract_invoice_data(pdf_data: PDFData):
     try:
-        # Save the uploaded PDF file temporarily
+        # Decode the base64 PDF data
+        pdf_bytes = base64.b64decode(pdf_data.data)
+        
+        # Save the decoded PDF data to a temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-            temp_pdf.write(await file.read())
+            temp_pdf.write(pdf_bytes)
             temp_pdf_path = temp_pdf.name
-            logging.info(f"Uploaded PDF file saved temporarily at {temp_pdf_path}")
+            logging.info(f"Decoded PDF data saved temporarily at {temp_pdf_path}")
 
         # Initialize the extractor with your OpenAI API key
         api_key = "your_openai_api"
