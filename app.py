@@ -1,190 +1,215 @@
-import tabula
-import pandas as pd
+import fitz
 import os
-from openai import OpenAI
 import json
-from typing import Dict, List, Tuple
 import re
+import pandas as pd
+import openai
+from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import pickle
 from datetime import datetime
-import warnings
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
 import logging
+from typing import List, Dict, Optional
+import time
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
-# Suppress warnings
-warnings.filterwarnings("ignore")
+# Initialize FastAPI app
+app = FastAPI(
+    title="PDF Data Extractor🤖",
+    description="Extract structured data from PDF files using OpenAI's GPT-4 model.",
+    version="0.1.0",
+)
 
-# Initialize FastAPI application
-app = FastAPI()
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-class InvoiceDataExtractor:
-    def __init__(self, api_key: str):
-        self.client = OpenAI(api_key=api_key)
-        self.target_fields = ['invoice_number', 'date', 'amount']
+# Load OpenAI API key from .env file
+load_dotenv()
+api_key = os.getenv('OPENAI_API_KEY')
+
+class DataProcessor:
+    def __init__(self, cache_dir: str = "cache"):
+        self.cache_dir = cache_dir
+        self.ensure_cache_dir()
+        openai.api_key = api_key
         
-    def preprocess_date(self, date_str: str) -> str:
-        """Convert various date formats to a standardized format."""
+        # Compile regex patterns for pre-processing
+        self.patterns = {
+            'reference': r'(?i)(?:ref(?:erence)?(?:\s)?(?:no|number|#)?[\s:]*)([A-Z0-9-]+)',
+            'date': r'(?i)(?:date[d]?[\s:]*)(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2})',
+            'amount': r'(?i)(?:amount|total|sum)[\s:]*[$€£]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
+        }
+        self.compiled_patterns = {
+            key: re.compile(pattern) for key, pattern in self.patterns.items()
+        }
+
+    def ensure_cache_dir(self):
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+
+    def get_cache_key(self, text: str) -> str:
+        return hashlib.md5(text.encode()).hexdigest()
+
+    def get_from_cache(self, cache_key: str) -> Optional[List[Dict]]:
+        cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    if time.time() - cached_data['timestamp'] < 86400:
+                        return cached_data['data']
+            except Exception as e:
+                logger.warning(f"Cache read error: {e}")
+        return None
+
+    def save_to_cache(self, cache_key: str, data: List[Dict]):
+        cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
         try:
-            if pd.isna(date_str) or not str(date_str).strip():
-                return ""
-            date_formats = [
-                "%d/%m/%Y", "%Y/%m/%d", "%m/%d/%Y",
-                "%d-%m-%Y", "%Y-%m-%d", "%m-%d-%Y",
-                "%d.%m.%Y", "%Y.%m.%d", "%b %d %Y",
-                "%B %d %Y", "%d %b %Y", "%d %B %Y"
-            ]
-            for part in str(date_str).strip().split():
-                for fmt in date_formats:
+            with open(cache_file, 'wb') as f:
+                pickle.dump({'timestamp': time.time(), 'data': data}, f)
+        except Exception as e:
+            logger.warning(f"Cache write error: {e}")
+
+    def pre_process_chunk(self, chunk: str) -> List[Dict]:
+        results = []
+        lines = chunk.split('\n')
+        for i in range(len(lines)):
+            line_context = ' '.join(lines[max(0, i-2):min(len(lines), i+3)])
+            matches = {field: self.compiled_patterns[field].search(line_context) for field in self.patterns}
+            if all(matches.values()):
+                results.append({
+                    'Reference number': matches['reference'].group(1),
+                    'Date': matches['date'].group(1),
+                    'Amount': matches['amount'].group(1)
+                })
+        return results
+
+    def validate_data(self, data: List[Dict]) -> List[Dict]:
+        validated = []
+        for entry in data:
+            try:
+                for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y']:
                     try:
-                        parsed_date = datetime.strptime(part, fmt)
-                        return parsed_date.strftime("%Y-%m-%d")
+                        date_obj = datetime.strptime(entry['Date'], fmt)
+                        entry['Date'] = date_obj.strftime('%Y-%m-%d')
+                        break
                     except ValueError:
                         continue
-            return date_str
-        except Exception as e:
-            logger.error(f"Error preprocessing date {date_str}: {e}")
-            return date_str
-    
-    def preprocess_amount(self, amount_str: str) -> str:
-        """Convert amount to a clean decimal format."""
-        try:
-            amount_str = re.sub(r'[^\d.-]', '', str(amount_str))
-            amount = float(amount_str)
-            return f"{amount:.2f}"
-        except Exception as e:
-            logger.error(f"Error preprocessing amount {amount_str}: {e}")
-            return amount_str
-    
-    def preprocess_invoice_number(self, invoice_str: str) -> str:
-        """Remove common prefixes from invoice numbers."""
-        try:
-            prefixes = ['INV', 'INV#', 'INVOICE', 'INVOICE#', '#']
-            result = invoice_str
-            for prefix in prefixes:
-                result = re.sub(f'^{prefix}\\s*', '', result, flags=re.IGNORECASE)
-            return result.strip()
-        except Exception as e:
-            logger.error(f"Error preprocessing invoice number {invoice_str}: {e}")
-            return invoice_str
+                entry['Amount'] = re.sub(r'[^0-9.]', '', entry['Amount'])
+                float(entry['Amount'])
+                validated.append(entry)
+            except Exception as e:
+                logger.warning(f"Validation error: {e}")
+        return validated
 
-    def analyze_sample_rows(self, table: pd.DataFrame, sample_rows: int = 3) -> Tuple[Dict[str, int], bool]:
-        """Analyze table structure to identify column mappings."""
-        try:
-            if table.empty:
-                logger.info("Empty table detected. Skipping analysis.")
-                return {}, False
+    def process_chunk_with_gpt(self, chunk: str) -> List[Dict]:
+        cache_key = self.get_cache_key(chunk)
+        cached_result = self.get_from_cache(cache_key)
+        if cached_result is not None:
+            return cached_result
 
-            analysis_str = "Column Names (potential header row):\n" + " | ".join([f"Column {i}: {col}" for i, col in enumerate(table.columns)])
-            for idx, row in table.head(sample_rows).iterrows():
-                analysis_str += " | ".join([f"Column {i}: {val}" for i, val in enumerate(row)]) + "\n"
+        regex_results = self.pre_process_chunk(chunk)
+        if regex_results:
+            validated_results = self.validate_data(regex_results)
+            if validated_results:
+                self.save_to_cache(cache_key, validated_results)
+                return validated_results
 
-            prompt = f"""
-            Analyze this table structure to:
-            1. Determine if the column names row is actually a data row that tabula incorrectly identified as headers.
-            2. Identify which columns contain these fields:
-            - invoice_number (unique identifier in the 'Num' column, e.g., 'RC24-4423')
-            - date (a valid date like 'DD/MM/YYYY' or 'YYYY-MM-DD')
-            - amount (a valid numeric value)
-            Table Structure:
-            {analysis_str}
-            Example response:
-            {{"column_mappings": {{"invoice_number": 1, "date": 0, "amount": 7}}, "include_header_as_data": true}}
-            """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                prompt = (
+                    "Extract Reference number, Date, and Amount from this text. Rules:\n"
+                    "1. Only include entries with ALL fields present.\n"
+                    "2. Skip partial matches.\n"
+                    "3. Ensure fields are related.\n"
+                    "Return as a JSON array with keys: 'Reference number', 'Date', 'Amount'.\n"
+                    f"Text:\n{chunk}\n"
+                )
+                client = openai.Client(api_key=api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1000,
+                    temperature=0.0
+                )
 
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "system", "content": "You are a precise data extraction assistant. Respond only with valid JSON."},
-                          {"role": "user", "content": prompt}],
-                temperature=0
-            )
-            result = json.loads(response.choices[0].message.content)
-            return result['column_mappings'], result['include_header_as_data']
-        except Exception as e:
-            logger.error(f"Error in sample analysis: {e}")
-            return {}, False
+                content = response.choices[0].message.content
+                json_match = re.search(r'\[.*\]', content, re.DOTALL)
 
-    def is_valid_record(self, record: Dict) -> bool:
-        """Check if all required fields in a record have non-empty values."""
-        return all(record.get(field, "").strip() != "" for field in self.target_fields)
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    validated_data = self.validate_data(data)
+                    if validated_data:
+                        self.save_to_cache(cache_key, validated_data)
+                        return validated_data
 
-    def preprocess_field(self, field_name: str, value: str) -> str:
-        """Preprocess fields based on their type."""
-        if pd.isna(value) or not str(value).strip():
-            return ""
-        value = str(value).strip()
-        if field_name == 'date':
-            return self.preprocess_date(value)
-        elif field_name == 'amount':
-            return self.preprocess_amount(value)
-        elif field_name == 'invoice_number':
-            return self.preprocess_invoice_number(value)
-        return value
-    
-    def extract_data_using_mappings(self, table: pd.DataFrame, column_mappings: Dict[str, int], include_header_as_data: bool) -> List[Dict]:
-        """Extract data from table using specified column mappings."""
-        extracted_data = []
-        if include_header_as_data:
-            header_row = {field: self.preprocess_field(field, table.columns[col_idx]) for field, col_idx in column_mappings.items()}
-            if self.is_valid_record(header_row):
-                extracted_data.append(header_row)
-        
-        for _, row in table.iterrows():
-            record = {field: self.preprocess_field(field, row.iloc[col_idx]) for field, col_idx in column_mappings.items()}
-            if self.is_valid_record(record):
-                extracted_data.append(record)
-        
-        return extracted_data
-    
-    def process_table(self, table: pd.DataFrame) -> List[Dict]:
-        """Process each table by analyzing structure and extracting relevant data."""
-        table.replace({'\r': ' ', '\n': ' '}, regex=True, inplace=True)
-        column_mappings, include_header_as_data = self.analyze_sample_rows(table)
-        return self.extract_data_using_mappings(table, column_mappings, include_header_as_data) if column_mappings else []
-    
-    def extract_from_pdf(self, pdf_path: str, output_path: str):
-        """Extract data from each table in the PDF and save results."""
-        try:
-            logger.info(f"Processing PDF: {pdf_path}")
-            tables = tabula.read_pdf(pdf_path, pages='all', multiple_tables=True)
-            if not tables:
-                logger.warning("No tables found in the PDF.")
                 return []
 
-            all_extracted_data = pd.DataFrame()
-            for i, table in enumerate(tables, 1):
-                extracted_data = self.process_table(table)
-                if extracted_data:
-                    all_extracted_data = pd.concat([all_extracted_data, pd.DataFrame(extracted_data)], ignore_index=True)
+            except Exception as e:
+                logger.warning(f"GPT processing attempt {attempt + 1} failed: {e}")
+                time.sleep(2 ** attempt)
 
-            if not all_extracted_data.empty:
-                all_extracted_data.to_csv(output_path, index=False)
-                logger.info(f"Success! Extracted data saved to {output_path}")
-                return all_extracted_data.to_dict(orient='records')
-            else:
-                logger.info("No valid invoice data found in the tables.")
-                return []
-        except Exception as e:
-            logger.error(f"Error processing PDF: {e}")
-            return []
+        return []
 
-@app.post("/extract_invoice_data")
-async def extract_invoice_data(pdf_file: UploadFile = File(...)):
+    def process_pdf(self, pdf_path: str) -> List[Dict]:
+        doc = fitz.open(pdf_path)
+        extracted_text = []
+        for page in doc:
+            extracted_text.append(page.get_text())
+        doc.close()
+        full_text = '\n'.join(extracted_text)
+        chunks = [full_text[i:i+1000] for i in range(0, len(full_text), 1000)]
+
+        results = []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            chunk_results = list(executor.map(self.process_chunk_with_gpt, chunks))
+        for result in chunk_results:
+            results.extend(result)
+
+        return results
+
+processor = DataProcessor()
+
+@app.post("/upload-pdf/")
+async def upload_pdf(file: UploadFile):
     try:
-        api_key = "your_api_key"
-        extractor = InvoiceDataExtractor(api_key)
-        pdf_bytes = await pdf_file.read()
-        pdf_path = f"{pdf_file.filename}"
-        with open(pdf_path, "wb") as f:
-            f.write(pdf_bytes)
+        if not file.filename.endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are allowed.")
 
-        output_path = "extracted_invoice_data.csv"
-        extracted_data = extractor.extract_from_pdf(pdf_path, output_path)
-        
-        return JSONResponse(content=extracted_data)
+        pdf_path = f"temp_{file.filename}"
+        with open(pdf_path, "wb") as f:
+            f.write(await file.read())
+
+        data = processor.process_pdf(pdf_path)
+        os.remove(pdf_path)
+
+        if not data:
+            return JSONResponse(content={"message": "No valid data extracted"}, status_code=200)
+
+        return JSONResponse(content={"data": data}, status_code=200)
+
     except Exception as e:
-        logger.error(f"Error in API endpoint: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        logger.error(f"Error processing file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+    

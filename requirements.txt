@@ -1,9 +1,6 @@
-tabula-py
-JPype1
-streamlit
+fitz
 pandas
-transformers
-torch
-uvicorn
 openai
+python-dotenv
 fastapi
+uvicorn

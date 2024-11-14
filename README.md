@@ -1,76 +1,69 @@
-## Invoice Data Extractor API 🔰
+https://github.com/Xsolai/PDFTableExtraction.git
 
-### Overview
+# PDF Data Extractor🤖
 
-This API is designed to process PDF invoices and extract essential data fields such as:
+This FastAPI application extracts structured data from PDF files using OpenAI's GPT-4 model. The extracted data includes Reference number, Date, and Amount from the text within the PDF.
 
-* **Invoice Number**
-* **Date**
-* **Amount**
+## Features
 
-It leverages OpenAI's GPT-3.5 model to assist with identifying the location of these fields in tabular data, supporting various date formats and handling preprocessing of amounts and invoice numbers.
+- Upload PDF files and extract structured data.
+- Uses regex forinitial data extraction and validation.
+- Utilizes OpenAI's GPT-4 model for enhanced data extraction.
+- Caches results to improve performance andreduce API calls.
+- Supports CORS for cross-origin requests.
 
-### Features
+## Requirements
 
-* **PDF Parsing** : Extracts tables from PDF invoices using `tabula`.
-* **Data Extraction** : Uses GPT-3.5 for identifying key fields from sample rows.
-* **Data Preprocessing** : Handles different formats for dates, amounts, and invoice numbers to ensure clean output.
+- Python 3.7+
+- FastAPI
+- Uvicorn
+- PyMuPDF (fitz)
+- Pandas
+- OpenAI Python client
+- python-dotenv
 
----
+## Installation
 
-### Project Structure
+    1. Clone the repository:
 
-The primary class, `InvoiceDataExtractor`, contains the following methods:
+```
+git clone https://github.com/Xsolai/PDFTableExtraction.git
+```
 
-* **`preprocess_date`** : Standardizes various date formats to `YYYY-MM-DD`.
-* **`preprocess_amount`** : Cleans and formats amounts as floating-point values.
-* **`preprocess_invoice_number`** : Strips common prefixes to extract clean invoice numbers.
-* **`analyze_sample_rows`** : Uses OpenAI GPT-3.5 to determine column mappings for key fields.
-* **`extract_data_using_mappings`** : Extracts and preprocesses data from table rows based on column mappings.
-* **`extract_from_pdf`** : Reads and processes tables from PDF files, aggregating results.
+```
+cd PDFTableExtraction
+```
 
-### Prerequisites
+    2. Create and activate a virtual environment:
 
-1. **Python 3.7+**
-2. **Dependencies** :
+```
+python -m venv venv
+```
 
-* FastAPI
-* Tabula
-* Pandas
-* OpenAI API client
+```
+source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+```
 
-To install these dependencies, run:
+    3. Install the required packages:
 
 ```
 pip install -r requirements.txt
 ```
 
-**Java** : `tabula-py` requires Java to be installed for PDF processing.
+    4. Create a`.env `filei n the root directory and add your OpenAI API key:
 
 ```
-https://www.java.com/en/download/
-
+OPENAI_API_KEY=your_openai_api_key
 ```
 
-After installation add this to system path and restart the pc!
+## Usage
 
-### Setup
-
-1. **OpenAI API Key** : Replace `api_key` in the `app.py` endpoint with your actual OpenAI API key.
-2. **Run the FastAPI App** :
+    1. Run the FastAPIapplication:
 
 ```
-uvicorn app:app --relaod
+uvicorn app:app --reload
 ```
 
-### API Endpoints
+    2. Open your browser and navigate to`http://127.0.0.1:8000/docs` to access the interactive API documentation.
 
-#### 1. Extract Invoice Data
-
-* **Endpoint** : `POST /extract-invoice-data`
-* **Description** : Accepts a PDF file, extracts tabular invoice data, and returns the specified fields.
-* **Request** : Multipart form data with an uploaded PDF file.
-* **Response** :
-* `200 OK`: JSON with extracted data.
-* `400 Bad Request`: If no data is extracted.
-* `500 Internal Server Error`: For any processing errors.
+    3. Use the`/upload-pdf/` endpoint to upload a PDF file and extract data.
