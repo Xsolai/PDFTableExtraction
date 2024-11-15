@@ -21,7 +21,7 @@ from pydantic import BaseModel
 # Initialize FastAPI app
 app = FastAPI(
     title="PDF Data Extractor🤖",
-    description="Extract structured data from PDF files using OpenAI's GPT-4 model.",
+    description="Extract structured data from PDF files",
     version="0.1.0",
 )
 

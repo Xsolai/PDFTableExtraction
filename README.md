@@ -1,5 +1,3 @@
-https://github.com/Xsolai/PDFTableExtraction.git
-
 # PDF Data Extractor🤖
 
 This FastAPI application extracts structured data from PDF files using OpenAI's GPT-4 model. The extracted data includes Reference number, Date, and Amount from the text within the PDF.
@@ -24,7 +22,7 @@ This FastAPI application extracts structured data from PDF files using OpenAI's 
 
 ## Installation
 
-    1. Clone the repository:
+1. Clone the repository:
 
 ```
 git clone https://github.com/Xsolai/PDFTableExtraction.git
@@ -34,7 +32,7 @@ git clone https://github.com/Xsolai/PDFTableExtraction.git
 cd PDFTableExtraction
 ```
 
-    2. Create and activate a virtual environment:
+2. Create and activate a virtual environment:
 
 ```
 python -m venv venv
@@ -44,13 +42,13 @@ python -m venv venv
 source venv/bin/activate  # On Windows use `venv\Scripts\activate`
 ```
 
-    3. Install the required packages:
+3. Install the required packages:
 
 ```
 pip install -r requirements.txt
 ```
 
-    4. Create a`.env `filei n the root directory and add your OpenAI API key:
+4. Create a`.env `filei n the root directory and add your OpenAI API key:
 
 ```
 OPENAI_API_KEY=your_openai_api_key
@@ -58,12 +56,11 @@ OPENAI_API_KEY=your_openai_api_key
 
 ## Usage
 
-    1. Run the FastAPIapplication:
+1. Run the FastAPIapplication:
 
 ```
 uvicorn app:app --reload
 ```
+2. Open your browser and navigate to`http://127.0.0.1:8000/docs` to access the interactive API documentation.
 
-    2. Open your browser and navigate to`http://127.0.0.1:8000/docs` to access the interactive API documentation.
-
-    3. Use the`/upload-pdf/` endpoint to upload a PDF file and extract data.
+3. Use the`/upload-pdf/` endpoint to upload a PDF file and extract data.
