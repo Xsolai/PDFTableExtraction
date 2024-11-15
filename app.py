@@ -15,6 +15,8 @@ import time
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+import base64
+from pydantic import BaseModel
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -187,6 +189,12 @@ class DataProcessor:
 
 processor = DataProcessor()
 
+
+# Define request model
+class Base64Request(BaseModel):
+    data: str
+    extension: str
+
 @app.post("/upload-pdf/")
 async def upload_pdf(file: UploadFile):
     try:
@@ -207,6 +215,59 @@ async def upload_pdf(file: UploadFile):
 
     except Exception as e:
         logger.error(f"Error processing file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+
+@app.post("/upload-base64-pdf/")
+async def upload_base64_pdf(request: Base64Request):
+    try:
+        # Validate file extension
+        if request.extension.lower() != "pdf":
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file type. Only PDF files are allowed."
+            )
+
+        try:
+            # Decode base64 data
+            file_data = base64.b64decode(request.data)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid base64 encoding"
+            )
+
+        # Save decoded data to temporary file
+        temp_filename = f"temp_base64_{os.urandom(8).hex()}.pdf"
+        try:
+            with open(temp_filename, "wb") as f:
+                f.write(file_data)
+
+            # Process the PDF using existing processor
+            data = processor.process_pdf(temp_filename)
+
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+
+        if not data:
+            return JSONResponse(
+                content={"message": "No valid data extracted"}, 
+                status_code=200
+            )
+
+        return JSONResponse(
+            content={"data": data},
+            status_code=200
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing base64 file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
