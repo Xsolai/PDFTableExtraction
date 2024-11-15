@@ -193,7 +193,7 @@ processor = DataProcessor()
 # Define request model
 class Base64Request(BaseModel):
     data: str
-    extension: str
+    ext: str
 
 @app.post("/upload-pdf/")
 async def upload_pdf(file: UploadFile):
@@ -224,7 +224,7 @@ async def upload_pdf(file: UploadFile):
 async def upload_base64_pdf(request: Base64Request):
     try:
         # Validate file extension
-        if request.extension.lower() != "pdf":
+        if request.ext.lower() != ".pdf":
             raise HTTPException(
                 status_code=400,
                 detail="Invalid file type. Only PDF files are allowed."
