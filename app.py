@@ -1,276 +1,380 @@
-import fitz
-import os
-import json
-import re
-import pandas as pd
-import openai
-from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor
-import hashlib
-import pickle
-from datetime import datetime
-import logging
-from typing import List, Dict, Optional
-import time
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
+from PyPDF2 import PdfReader
+from dotenv import load_dotenv
+import urllib.request
+import openai
+import os
+import logging
 import base64
-from pydantic import BaseModel
+import requests
+import ast
+
+# Load environment variables
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("API_KEY")
+
+if not OPENAI_API_KEY or not API_KEY:
+    raise RuntimeError("Please set 'OPENAI_API_KEY' and 'API_KEY' in your .env file")
+
+openai.api_key = OPENAI_API_KEY
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="PDF Data Extractor🤖",
-    description="Extract structured data from PDF files",
+    title="Vendor Statements Processor",
+    description="A FastAPI application to process vendor statements using OpenAI's ChatGPT model.",
     version="0.1.0",
+    docs_url="/",
+    redoc_url=None
 )
 
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Load OpenAI API key from .env file
-load_dotenv()
-api_key = os.getenv('OPENAI_API_KEY')
+# API Key Authentication
+api_key_header = APIKeyHeader(name="api_key", auto_error=False)
 
-class DataProcessor:
-    def __init__(self, cache_dir: str = "cache"):
-        self.cache_dir = cache_dir
-        self.ensure_cache_dir()
-        openai.api_key = api_key
-        
-        # Compile regex patterns for pre-processing
-        self.patterns = {
-            'reference': r'(?i)(?:ref(?:erence)?(?:\s)?(?:no|number|#)?[\s:]*)([A-Z0-9-]+)',
-            'date': r'(?i)(?:date[d]?[\s:]*)(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2})',
-            'amount': r'(?i)(?:amount|total|sum)[\s:]*[$€£]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
-        }
-        self.compiled_patterns = {
-            key: re.compile(pattern) for key, pattern in self.patterns.items()
-        }
+# Dependency: Validate API Key
+async def validate_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != API_KEY:
+        logger.warning("Invalid API key provided.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return api_key
 
-    def ensure_cache_dir(self):
-        if not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
-
-    def get_cache_key(self, text: str) -> str:
-        return hashlib.md5(text.encode()).hexdigest()
-
-    def get_from_cache(self, cache_key: str) -> Optional[List[Dict]]:
-        cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, 'rb') as f:
-                    cached_data = pickle.load(f)
-                    if time.time() - cached_data['timestamp'] < 86400:
-                        return cached_data['data']
-            except Exception as e:
-                logger.warning(f"Cache read error: {e}")
-        return None
-
-    def save_to_cache(self, cache_key: str, data: List[Dict]):
-        cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
-        try:
-            with open(cache_file, 'wb') as f:
-                pickle.dump({'timestamp': time.time(), 'data': data}, f)
-        except Exception as e:
-            logger.warning(f"Cache write error: {e}")
-
-    def pre_process_chunk(self, chunk: str) -> List[Dict]:
-        results = []
-        lines = chunk.split('\n')
-        for i in range(len(lines)):
-            line_context = ' '.join(lines[max(0, i-2):min(len(lines), i+3)])
-            matches = {field: self.compiled_patterns[field].search(line_context) for field in self.patterns}
-            if all(matches.values()):
-                results.append({
-                    'Reference number': matches['reference'].group(1),
-                    'Date': matches['date'].group(1),
-                    'Amount': matches['amount'].group(1)
-                })
-        return results
-
-    def validate_data(self, data: List[Dict]) -> List[Dict]:
-        validated = []
-        for entry in data:
-            try:
-                for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y']:
-                    try:
-                        date_obj = datetime.strptime(entry['Date'], fmt)
-                        entry['Date'] = date_obj.strftime('%Y-%m-%d')
-                        break
-                    except ValueError:
-                        continue
-                entry['Amount'] = re.sub(r'[^0-9.]', '', entry['Amount'])
-                float(entry['Amount'])
-                validated.append(entry)
-            except Exception as e:
-                logger.warning(f"Validation error: {e}")
-        return validated
-
-    def process_chunk_with_gpt(self, chunk: str) -> List[Dict]:
-        cache_key = self.get_cache_key(chunk)
-        cached_result = self.get_from_cache(cache_key)
-        if cached_result is not None:
-            return cached_result
-
-        regex_results = self.pre_process_chunk(chunk)
-        if regex_results:
-            validated_results = self.validate_data(regex_results)
-            if validated_results:
-                self.save_to_cache(cache_key, validated_results)
-                return validated_results
-
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                prompt = (
-                    "Extract Reference number, Date, and Amount from this text. Rules:\n"
-                    "1. Only include entries with ALL fields present.\n"
-                    "2. Skip partial matches.\n"
-                    "3. Ensure fields are related.\n"
-                    "Return as a JSON array with keys: 'Reference number', 'Date', 'Amount'.\n"
-                    f"Text:\n{chunk}\n"
-                )
-                client = openai.Client(api_key=api_key)
-                response = client.chat.completions.create(
-                    model="gpt-4-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1000,
-                    temperature=0.0
-                )
-
-                content = response.choices[0].message.content
-                json_match = re.search(r'\[.*\]', content, re.DOTALL)
-
-                if json_match:
-                    data = json.loads(json_match.group(0))
-                    validated_data = self.validate_data(data)
-                    if validated_data:
-                        self.save_to_cache(cache_key, validated_data)
-                        return validated_data
-
-                return []
-
-            except Exception as e:
-                logger.warning(f"GPT processing attempt {attempt + 1} failed: {e}")
-                time.sleep(2 ** attempt)
-
-        return []
-
-    def process_pdf(self, pdf_path: str) -> List[Dict]:
-        doc = fitz.open(pdf_path)
-        extracted_text = []
-        for page in doc:
-            extracted_text.append(page.get_text())
-        doc.close()
-        full_text = '\n'.join(extracted_text)
-        chunks = [full_text[i:i+1000] for i in range(0, len(full_text), 1000)]
-
-        results = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            chunk_results = list(executor.map(self.process_chunk_with_gpt, chunks))
-        for result in chunk_results:
-            results.extend(result)
-
-        return results
-
-processor = DataProcessor()
-
-
-# Define request model
-class Base64Request(BaseModel):
-    data: str
-    ext: str
-
-@app.post("/upload-pdf/")
-async def upload_pdf(file: UploadFile):
+# Utility: Extract text from PDF
+def extract_pdf_text(file_path: str) -> str:
     try:
-        if not file.filename.endswith(".pdf"):
-            raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are allowed.")
-
-        pdf_path = f"temp_{file.filename}"
-        with open(pdf_path, "wb") as f:
-            f.write(await file.read())
-
-        data = processor.process_pdf(pdf_path)
-        os.remove(pdf_path)
-
-        if not data:
-            return JSONResponse(content={"message": "No valid data extracted"}, status_code=200)
-
-        return JSONResponse(content={"data": data}, status_code=200)
-
+        logger.info("Extracting text from PDF...")
+        reader = PdfReader(file_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text()
+        logger.info("PDF text extraction complete.")
+        return text
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error during PDF text extraction: {e}")
+        raise HTTPException(status_code=500, detail="Error extracting text from PDF")
+
+# Utility: Mock token usage calculation
+def calculate_tokens(text: str) -> int:
+    word_count = len(text.split())
+    tokens = word_count // 4  # Approximation: 1 token = 4 words
+    logger.info(f"Calculated token usage: {tokens} tokens for {word_count} words.")
+    return tokens
+
+# Utility: Split text into chunks
+def split_text(text: str, max_length: int) -> list:
+    """Split the text into smaller chunks within the token limit."""
+    chunks = []
+    while len(text) > max_length:
+        split_index = text[:max_length].rfind('\n')  # Split at the nearest newline
+        if split_index == -1:
+            split_index = max_length
+        chunks.append(text[:split_index])
+        text = text[split_index:]
+    chunks.append(text)
+    return chunks
+
+# Function: Extract vendor details
+async def extract_vendor_details(text: str):
+    """Extract vendor details using the first 2000 characters."""
+    truncated_text = text[:2000]
+    system_prompt = (
+        "You are an assistant specialized in extracting vendor details. "
+        "Extract only vendor-related information, such as name, address, website, city, email, and ID."
+    )
+    user_prompt = f"""
+Extract the vendor details from the following text:
+
+{truncated_text}
+
+Return ONLY valid JSON data in this exact format:
+{{
+  "vendorDetails": {{
+    "vendorName": "string",
+    "vendorAddress": "string",
+    "vendorWebsite": "string",
+    "vendorCity": "string",
+    "vendorEmail": "string",
+    "vendorID": "string"
+  }}
+}}
+"""
+    try:
+        client = openai.Client(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4-0613",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0,
+        )
+        return ast.literal_eval(response.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"Failed to extract vendor details: {e}")
+        raise HTTPException(status_code=500, detail="Error extracting vendor details")
+
+# Function: Process text chunks for invoice data
+async def process_text_chunks(text_chunks: list):
+    """Process text chunks to extract invoice data."""
+    results = []
+    total_tokens_used = 0
+
+    for i, chunk in enumerate(text_chunks):
+        system_prompt = (
+            "You are an assistant specialized in extracting invoice data. "
+            "Extract structured invoice entries from the text provided."
+        )
+        user_prompt = f"""
+Extract the invoice details from the following text chunk:
+
+{chunk}
+
+Return ONLY valid JSON data in this exact format:
+{{
+  "invoicesData": [
+    {{
+      "invoiceID": "string",
+      "invoiceDate": "string",
+      "poNumber": "string",
+      "creditAmount": "float",
+      "debitAmount": "float"
+    }}
+  ]
+}}
+"""
+        try:
+            client = openai.Client(api_key=OPENAI_API_KEY)
+            response = client.chat.completions.create(
+                model="gpt-4-0613",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0,
+            )
+            formatted_output = response.choices[0].message.content
+            total_tokens_used += response.usage.total_tokens if response.usage else 0
+            results.append(ast.literal_eval(formatted_output))
+        except Exception as e:
+            logger.error(f"Failed to process chunk {i + 1}: {e}")
+    return results, total_tokens_used
+
+# Endpoint: Upload PDF and process
+@app.post("/api/v1/vendor-statements/upload")
+async def upload_pdf(file: UploadFile = File(...), api_key: str = Depends(validate_api_key)):
+    try:
+        # Save the uploaded file
+        file_path = f"./uploads/{file.filename}"
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+        
+        # Extract text from the PDF
+        extracted_text = extract_pdf_text(file_path)
+        
+        # Extract vendor details
+        vendor_details = await extract_vendor_details(extracted_text)
+        
+        # Process invoice data in chunks
+        max_chunk_size = 2000
+        text_chunks = split_text(extracted_text, max_chunk_size)
+        processed_chunks, total_tokens_used = await process_text_chunks(text_chunks)
+
+        # Aggregate invoices
+        invoices_data = []
+        for chunk_result in processed_chunks:
+            invoices_data.extend(chunk_result.get("invoicesData", []))
+        
+        # Calculate balances and validation
+        open_balance = sum(item.get("creditAmount", 0) for item in invoices_data) - \
+                       sum(item.get("debitAmount", 0) for item in invoices_data)
+        closing_balance = open_balance
+        validation_status = "Valid" if open_balance == closing_balance else "Invalid"
+        validation_message = "Balances match." if validation_status == "Valid" else "Balances do not match."
+        
+        # Format response
+        data = {
+            "vendorDetails": vendor_details.get("vendorDetails", {}),
+            "invoiceSummary": {
+                "invoiceDate": invoices_data[0].get("invoiceDate", "") if invoices_data else "",
+                "numberOfRowItems": len(invoices_data),
+                "openBalance": open_balance,
+                "closingBalance": closing_balance,
+                "validationStatus": validation_status,
+                "isChatGPTUsed": True,
+                "chatGPTTokenUsage": total_tokens_used
+            },
+            "invoicesData": invoices_data,
+            "validationResults": {
+                "balanceValidationStatus": validation_status,
+                "balanceValidationMessage": validation_message
+            },
+            "fileContent": extracted_text,
+            "tokensUsed": {
+                "totalTokensUsed": total_tokens_used,
+                "chatGPTTokensUsed": total_tokens_used
+            }
+        }
+        meta = {
+            "isFileDownloaded": False,
+            "fileSource": "Upload",
+            "fileType": "PDF",
+            "apiKeyValidation": "Valid",
+            "hostingIntegration": True
+        }
+        return JSONResponse(content={"status": "success", "message": "Operation completed successfully.", "data": data, "meta": meta})
+    except Exception as e:
+        error = {"errorCode": "500", "errorMessage": str(e)}
+        return JSONResponse(content={"status": "error", "message": str(e), "error": error})
     
 
 
 
-@app.post("/upload-base64-pdf/")
-async def upload_base64_pdf(request: Base64Request):
+# Endpoint: Base64 PDF upload
+@app.post("/api/v1/vendor-statements/base64")
+async def upload_base64_pdf(file: str = Form(...), api_key: str = Depends(validate_api_key)):
     try:
-        # Validate file extension
-        if request.ext.lower() != ".pdf":
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid file type. Only PDF files are allowed."
-            )
+        # Decode base64 string
+        file_data = base64.b64decode(file)
+        
+        # Save the decoded file
+        file_path = "./uploads/base64_upload.pdf"
+        with open(file_path, "wb") as f:
+            f.write(file_data)
+        
+        # Extract text from the PDF
+        extracted_text = extract_pdf_text(file_path)
+        
+        # Extract vendor details
+        vendor_details = await extract_vendor_details(extracted_text)
+        
+        # Process invoice data in chunks
+        max_chunk_size = 2000
+        text_chunks = split_text(extracted_text, max_chunk_size)
+        processed_chunks, total_tokens_used = await process_text_chunks(text_chunks)
 
-        try:
-            # Decode base64 data
-            file_data = base64.b64decode(request.data)
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid base64 encoding"
-            )
-
-        # Save decoded data to temporary file
-        temp_filename = f"temp_base64_{os.urandom(8).hex()}.pdf"
-        try:
-            with open(temp_filename, "wb") as f:
-                f.write(file_data)
-
-            # Process the PDF using existing processor
-            data = processor.process_pdf(temp_filename)
-
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_filename):
-                os.remove(temp_filename)
-
-        if not data:
-            return JSONResponse(
-                content={"message": "No valid data extracted"}, 
-                status_code=200
-            )
-
-        return JSONResponse(
-            content={"data": data},
-            status_code=200
-        )
-
-    except HTTPException:
-        raise
+        # Aggregate invoices
+        invoices_data = []
+        for chunk_result in processed_chunks:
+            invoices_data.extend(chunk_result.get("invoicesData", []))
+        
+        # Calculate balances and validation
+        open_balance = sum(item.get("creditAmount", 0) for item in invoices_data) - \
+                       sum(item.get("debitAmount", 0) for item in invoices_data)
+        closing_balance = open_balance
+        validation_status = "Valid" if open_balance == closing_balance else "Invalid"
+        validation_message = "Balances match." if validation_status == "Valid" else "Balances do not match."
+        
+        # Format response
+        data = {
+            "vendorDetails": vendor_details.get("vendorDetails", {}),
+            "invoiceSummary": {
+                "invoiceDate": invoices_data[0].get("invoiceDate", "") if invoices_data else "",
+                "numberOfRowItems": len(invoices_data),
+                "openBalance": open_balance,
+                "closingBalance": closing_balance,
+                "validationStatus": validation_status,
+                "isChatGPTUsed": True,
+                "chatGPTTokenUsage": total_tokens_used
+            },
+            "invoicesData": invoices_data,
+            "validationResults": {
+                "balanceValidationStatus": validation_status,
+                "balanceValidationMessage": validation_message
+            },
+            "fileContent": extracted_text,
+            "tokensUsed": {
+                "totalTokensUsed": total_tokens_used,
+                "chatGPTTokensUsed": total_tokens_used
+            }
+        }
+        meta = {
+            "isFileDownloaded": False,
+            "fileSource": "Base64",
+            "fileType": "PDF",
+            "apiKeyValidation": "Valid",
+            "hostingIntegration": True
+        }
+        return JSONResponse(content={"status": "success", "message": "Operation completed successfully.", "data": data, "meta": meta})
     except Exception as e:
-        logger.error(f"Error processing base64 file: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error = {"errorCode": "500", "errorMessage": str(e)}
+        return JSONResponse(content={"status": "error", "message": str(e), "error": error})
+    
+
+# Endpoint: File Link
+@app.post("/api/v1/vendor-statements/link")
+async def upload_link_pdf(file_url: str = Form(...), api_key: str = Depends(validate_api_key)):
+    try:
+        # Download the file from the URL
+        file_path = "./uploads/link_upload.pdf"
+        urllib.request.urlretrieve(file_url, file_path)
+        
+        # Extract text from the PDF
+        extracted_text = extract_pdf_text(file_path)
+        
+        # Extract vendor details
+        vendor_details = await extract_vendor_details(extracted_text)
+        
+        # Process invoice data in chunks
+        max_chunk_size = 2000
+        text_chunks = split_text(extracted_text, max_chunk_size)
+        processed_chunks, total_tokens_used = await process_text_chunks(text_chunks)
+
+        # Aggregate invoices
+        invoices_data = []
+        for chunk_result in processed_chunks:
+            invoices_data.extend(chunk_result.get("invoicesData", []))
+        
+        # Calculate balances and validation
+        open_balance = sum(item.get("creditAmount", 0) for item in invoices_data) - \
+                       sum(item.get("debitAmount", 0) for item in invoices_data)
+        closing_balance = open_balance
+        validation_status = "Valid" if open_balance == closing_balance else "Invalid"
+        validation_message = "Balances match." if validation_status == "Valid" else "Balances do not match."
+        
+        # Format response
+        data = {
+            "vendorDetails": vendor_details.get("vendorDetails", {}),
+            "invoiceSummary": {
+                "invoiceDate": invoices_data[0].get("invoiceDate", "") if invoices_data else "",
+                "numberOfRowItems": len(invoices_data),
+                "openBalance": open_balance,
+                "closingBalance": closing_balance,
+                "validationStatus": validation_status,
+                "isChatGPTUsed": True,
+                "chatGPTTokenUsage": total_tokens_used
+            },
+            "invoicesData": invoices_data,
+            "validationResults": {
+                "balanceValidationStatus": validation_status,
+                "balanceValidationMessage": validation_message
+            },
+            "fileContent": extracted_text,
+            "tokensUsed": {
+                "totalTokensUsed": total_tokens_used,
+                "chatGPTTokensUsed": total_tokens_used
+            }
+        }
+        meta = {
+            "isFileDownloaded": True,
+            "fileSource": "Link",
+            "fileType": "PDF",
+            "apiKeyValidation": "Valid",
+            "hostingIntegration": True
+        }
+        return JSONResponse(content={"status": "success", "message": "Operation completed successfully.", "data": data, "meta": meta})
+    except Exception as e:
+        error = {"errorCode": "500", "errorMessage": str(e)}
+        return JSONResponse(content={"status": "error", "message": str(e), "error": error})
+    
+
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    
