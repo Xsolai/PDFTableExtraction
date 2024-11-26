@@ -10,6 +10,8 @@ import logging
 import base64
 import requests
 import ast
+import json
+import re
 
 # Load environment variables
 load_dotenv()
@@ -82,10 +84,14 @@ def split_text(text: str, max_length: int) -> list:
 # Function: Extract vendor details
 async def extract_vendor_details(text: str):
     """Extract vendor details using the first 2000 characters."""
-    truncated_text = text[:2000]
+    truncated_text = text[:500]
+    logger.info("Extracting vendor details...")
+
     system_prompt = (
         "You are an assistant specialized in extracting vendor details. "
-        "Extract only vendor-related information, such as name, address, website, city, email, and ID."
+        "Extract vendor-related information, such as name, address, website, city, email, and ID. "
+        "If any detail is not available, leave it as an empty string. "
+        "Do not include any commentary, explanations, or additional text. Return only valid JSON."
     )
     user_prompt = f"""
 Extract the vendor details from the following text:
@@ -100,7 +106,7 @@ Return ONLY valid JSON data in this exact format:
     "vendorWebsite": "string",
     "vendorCity": "string",
     "vendorEmail": "string",
-    "vendorID": "string"
+    "vendorID": 0.0
   }}
 }}
 """
@@ -114,10 +120,28 @@ Return ONLY valid JSON data in this exact format:
             ],
             temperature=0,
         )
-        return ast.literal_eval(response.choices[0].message.content)
+        raw_response = response.choices[0].message.content
+        logger.info(f"Raw response for vendor details: {raw_response}")
+
+        # Extract the JSON part using regex
+        match = re.search(r"{.*}", raw_response, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON found in the response")
+        
+        json_content = match.group(0)
+
+        # Parse the extracted JSON
+        parsed_response = json.loads(json_content)
+        return parsed_response
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parsing error in vendor details: {e}")
+        logger.debug(f"Response content: {raw_response}")
+        raise HTTPException(status_code=500, detail="Failed to parse vendor details response")
     except Exception as e:
         logger.error(f"Failed to extract vendor details: {e}")
         raise HTTPException(status_code=500, detail="Error extracting vendor details")
+
+
 
 # Function: Process text chunks for invoice data
 async def process_text_chunks(text_chunks: list):
@@ -127,11 +151,13 @@ async def process_text_chunks(text_chunks: list):
 
     for i, chunk in enumerate(text_chunks):
         system_prompt = (
-            "You are an assistant specialized in extracting invoice data. "
-            "Extract structured invoice entries from the text provided."
+            "You are an assistant specialized in extracting structured invoice data. "
+            "Each invoice entry should include invoiceID, invoiceDate, poNumber, creditAmount, and debitAmount. "
+            "If any of these details are not found, leave the field empty or as 0. "
+            "Return ONLY valid JSON in the specified format without any commentary or extra text. "
         )
         user_prompt = f"""
-Extract the invoice details from the following text chunk:
+Extract the structured invoice data from the following text chunk:
 
 {chunk}
 
@@ -142,12 +168,17 @@ Return ONLY valid JSON data in this exact format:
       "invoiceID": "string",
       "invoiceDate": "string",
       "poNumber": "string",
-      "creditAmount": "float",
-      "debitAmount": "float"
+      "creditAmount": 0.0,
+      "debitAmount": 0.0
     }}
   ]
 }}
+If no invoice details are found, return:
+{{
+  "invoicesData": []
+}}
 """
+
         try:
             client = openai.Client(api_key=OPENAI_API_KEY)
             response = client.chat.completions.create(
@@ -158,12 +189,39 @@ Return ONLY valid JSON data in this exact format:
                 ],
                 temperature=0,
             )
-            formatted_output = response.choices[0].message.content
+            raw_output = response.choices[0].message.content
+            logger.info(f"Raw output for chunk {i + 1}: {raw_output}")
             total_tokens_used += response.usage.total_tokens if response.usage else 0
-            results.append(ast.literal_eval(formatted_output))
+
+            # Extract JSON data using regex to handle possible extra text
+            match = re.search(r"{.*}", raw_output, re.DOTALL)
+            if not match:
+                raise ValueError(f"No JSON object found in response for chunk {i + 1}")
+
+            json_content = match.group(0)
+
+            # Parse and append the extracted JSON
+            parsed_data = json.loads(json_content)
+            results.append(parsed_data)
+
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in chunk {i + 1}: {e}")
+            logger.debug(f"Response content for chunk {i + 1}: {raw_output}")
         except Exception as e:
             logger.error(f"Failed to process chunk {i + 1}: {e}")
+
     return results, total_tokens_used
+
+
+
+
+
+
+
+
+
+
+
 
 # Endpoint: Upload PDF and process
 @app.post("/api/v1/vendor-statements/upload")
@@ -177,6 +235,10 @@ async def upload_pdf(file: UploadFile = File(...), api_key: str = Depends(valida
         
         # Extract text from the PDF
         extracted_text = extract_pdf_text(file_path)
+
+        # save the extracted text to a file
+        with open("./uploads/extracted_text.txt", "w") as f:
+            f.write(extracted_text)
         
         # Extract vendor details
         vendor_details = await extract_vendor_details(extracted_text)
@@ -250,6 +312,9 @@ async def upload_base64_pdf(file: str = Form(...), api_key: str = Depends(valida
         
         # Extract text from the PDF
         extracted_text = extract_pdf_text(file_path)
+
+      
+
         
         # Extract vendor details
         vendor_details = await extract_vendor_details(extracted_text)
