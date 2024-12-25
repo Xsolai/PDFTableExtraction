@@ -381,7 +381,7 @@ Extract the structured invoice data from the following text chunk:
 
 
 # Update the endpoint to include model selection
-@app.post("/api/v1/vendor-statements/upload")
+@app.post("/upload")
 async def upload_pdf(
     file: UploadFile = File(...), 
     model: ModelChoice = Form(ModelChoice.GPT),  # Default to GPT
@@ -468,7 +468,7 @@ async def upload_pdf(
 
 
 # Endpoint: Base64 PDF upload  Update the endpoint to include model selection
-@app.post("/api/v1/vendor-statements/base64")
+@app.post("/base64")
 async def upload_base64_pdf(
     data: str = Form(...),  # Base64 encoded file content
     ext: str = Form(...),   # File extension 
@@ -569,7 +569,7 @@ async def upload_base64_pdf(
     
 
 # Endpoint: File Link  Update the endpoint to include model selection
-@app.post("/api/v1/vendor-statements/link")
+@app.post("/link")
 async def upload_link_pdf(file_url: str = Form(...), model: ModelChoice = Form(ModelChoice.GPT), api_key: str = Depends(validate_api_key)):
     try:
         # Download the file from the URL
