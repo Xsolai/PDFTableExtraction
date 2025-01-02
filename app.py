@@ -465,7 +465,11 @@ async def upload_pdf(
         error = {"errorCode": "500", "errorMessage": str(e)}
         return JSONResponse(content={"status": "error", "message": str(e), "error": error})
     
-
+# Define a single Pydantic model for all input parameters
+class Base64RequestModel(BaseModel):
+    data: str  # Base64-encoded file content
+    ext: str   # File extension (e.g., 'pdf', 'txt')
+    model: ModelChoice = ModelChoice.GPT  # Default to GPT
 
 @app.post("/base64")
 async def upload_base64_pdf(
