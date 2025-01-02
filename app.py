@@ -483,7 +483,7 @@ async def upload_base64_pdf(
         # Validate file extension
         if request_body.ext.lower() not in ['pdf', 'txt']:
             raise HTTPException(status_code=400, detail="Unsupported file extension. Allowed extensions: 'pdf', 'txt'.")
-
+        ext=request_body.ext.lower()
         # Decode base64 string
         file_data = base64.b64decode(request_body.data)
         
