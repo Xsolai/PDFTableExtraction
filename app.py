@@ -470,16 +470,25 @@ async def upload_pdf(
 # Endpoint: Base64 PDF upload  Update the endpoint to include model selection
 @app.post("/base64")
 async def upload_base64_pdf(
-    data: str = Form(...),  # Base64 encoded file content
-    ext: str = Form(...),   # File extension 
-    model: ModelChoice = Form(ModelChoice.GPT),  # Default to GPT
+    request_body: dict,  # Expecting JSON input
     api_key: str = Depends(validate_api_key)
 ):
     try:
-        # Validate file extension
-        allowed_extensions = ['pdf', 'txt']
-        if ext.lower() not in allowed_extensions:
-            raise HTTPException(status_code=400, detail=f"Unsupported file extension. Allowed extensions: {', '.join(allowed_extensions)}")
+        # Validate JSON input
+        if not isinstance(request_body, dict):
+            raise HTTPException(status_code=400, detail="Invalid request format. JSON expected.")
+
+        data = request_body.get("data",None)
+        ext = request_body.get("ext",None)
+        model = request_body.get("model", ModelChoice.GPT.value)
+
+        # Validate fields
+        if not data or not ext:
+            raise HTTPException(status_code=400, detail="Fields 'data' and 'ext' are required.")
+        if ext.lower() not in ['pdf', 'txt']:
+            raise HTTPException(status_code=400, detail="Unsupported file extension. Allowed extensions: 'pdf', 'txt'.")
+        if model not in ModelChoice.__members__.values():
+            raise HTTPException(status_code=400, detail=f"Invalid model choice. Valid options: {', '.join(ModelChoice.__members__.values())}.")
 
         # Decode base64 string
         file_data = base64.b64decode(data)
