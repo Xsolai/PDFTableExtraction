@@ -467,13 +467,6 @@ async def upload_pdf(
     
 
 
-
-# Define a single Pydantic model for all input parameters
-class Base64RequestModel(BaseModel):
-    data: str  # Base64-encoded file content
-    ext: str   # File extension (e.g., 'pdf', 'txt')
-    model: ModelChoice = ModelChoice.GPT  # Default to GPT
-
 @app.post("/base64")
 async def upload_base64_pdf(
     request_body: Base64RequestModel,  # Use the unified model for input
@@ -483,21 +476,20 @@ async def upload_base64_pdf(
         # Validate file extension
         if request_body.ext.lower() not in ['pdf', 'txt']:
             raise HTTPException(status_code=400, detail="Unsupported file extension. Allowed extensions: 'pdf', 'txt'.")
-        ext=request_body.ext.lower()
-        model=request_body.model.lower()
+
         # Decode base64 string
         file_data = base64.b64decode(request_body.data)
         
         # Generate unique filename with correct extension
         import uuid
-        file_path = f"./uploads/{uuid.uuid4()}.{ext}"
+        file_path = f"./uploads/{uuid.uuid4()}.{request_body.ext}"
         
         # Save the decoded file
         with open(file_path, "wb") as f:
             f.write(file_data)
         
         # Extract text based on file type
-        if ext.lower() == 'pdf':
+        if request_body.ext.lower() == 'pdf':
             extracted_text = extract_pdf_text(file_path)
         else:  # txt file
             with open(file_path, 'r') as f:
@@ -508,7 +500,7 @@ async def upload_base64_pdf(
             f.write(extracted_text)
         
         # Select vendor details extraction function based on model
-        if model == ModelChoice.GPT:
+        if request_body.model == ModelChoice.GPT:
             vendor_details = await extract_vendor_details_gpt(extracted_text)
         else:
             vendor_details = await extract_vendor_details_groq(extracted_text)
@@ -517,7 +509,7 @@ async def upload_base64_pdf(
         max_chunk_size = 2000
         text_chunks = split_text(extracted_text, max_chunk_size)
         
-        if model == ModelChoice.GPT:
+        if request_body.model == ModelChoice.GPT:
             processed_chunks, total_tokens_used = await process_text_chunks_gpt(text_chunks)
         else:
             processed_chunks, total_tokens_used = await process_text_chunks_groq(text_chunks)
@@ -543,7 +535,7 @@ async def upload_base64_pdf(
                 "openBalance": open_balance,
                 "closingBalance": closing_balance,
                 "validationStatus": validation_status,
-                "modelUsed": model.value,
+                "modelUsed": request_body.model.value,
                 "tokenUsage": total_tokens_used
             },
             "invoicesData": invoices_data,
@@ -554,22 +546,21 @@ async def upload_base64_pdf(
             "fileContent": extracted_text,
             "tokensUsed": {
                 "totalTokensUsed": total_tokens_used,
-                "modelUsed": model.value
+                "modelUsed": request_body.model.value
             }
         }
         meta = {
             "isFileDownloaded": False,
             "fileSource": "Base64",
-            "fileType": ext.upper(),
+            "fileType": request_body.ext.upper(),
             "apiKeyValidation": "Valid",
             "hostingIntegration": True,
-            "selectedModel": model.value
+            "selectedModel": request_body.model.value
         }
         return JSONResponse(content={"status": "success", "message": "Operation completed successfully.", "data": data, "meta": meta})
     except Exception as e:
         error = {"errorCode": "500", "errorMessage": str(e)}
         return JSONResponse(content={"status": "error", "message": str(e), "error": error})
-    
     
 
 # Endpoint: File Link  Update the endpoint to include model selection
