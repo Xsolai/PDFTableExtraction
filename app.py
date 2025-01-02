@@ -14,6 +14,7 @@ import json
 import re
 from groq import Groq
 from enum import Enum
+from pydantic import BaseModel
 
 
 
