@@ -467,31 +467,24 @@ async def upload_pdf(
 
 
 
-# Endpoint: Base64 PDF upload  Update the endpoint to include model selection
+# Define a single Pydantic model for all input parameters
+class Base64RequestModel(BaseModel):
+    data: str  # Base64-encoded file content
+    ext: str   # File extension (e.g., 'pdf', 'txt')
+    model: ModelChoice = ModelChoice.GPT  # Default to GPT
+
 @app.post("/base64")
 async def upload_base64_pdf(
-    request_body: dict,  # Expecting JSON input
+    request_body: Base64RequestModel,  # Use the unified model for input
     api_key: str = Depends(validate_api_key)
 ):
     try:
-        # Validate JSON input
-        if not isinstance(request_body, dict):
-            raise HTTPException(status_code=400, detail="Invalid request format. JSON expected.")
-
-        data = request_body.get("data",None)
-        ext = request_body.get("ext",None)
-        model = request_body.get("model", ModelChoice.GPT.value)
-
-        # Validate fields
-        if not data or not ext:
-            raise HTTPException(status_code=400, detail="Fields 'data' and 'ext' are required.")
-        if ext.lower() not in ['pdf', 'txt']:
+        # Validate file extension
+        if request_body.ext.lower() not in ['pdf', 'txt']:
             raise HTTPException(status_code=400, detail="Unsupported file extension. Allowed extensions: 'pdf', 'txt'.")
-        if model not in ModelChoice.__members__.values():
-            raise HTTPException(status_code=400, detail=f"Invalid model choice. Valid options: {', '.join(ModelChoice.__members__.values())}.")
 
         # Decode base64 string
-        file_data = base64.b64decode(data)
+        file_data = base64.b64decode(request_body.data)
         
         # Generate unique filename with correct extension
         import uuid
